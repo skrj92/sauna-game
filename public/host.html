@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кто это? — экран</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  .menu { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 2vh 0; }
+  .game { background: var(--card); border: 2px solid var(--line); border-radius: 20px; padding: 20px; cursor: pointer; }
+  .game.on { border-color: var(--accent); box-shadow: 0 0 0 4px #ff7a2e33; }
+  .game h3 { font-size: 28px; }
+  .game p { margin: 0; color: var(--muted); font-size: 18px; }
+  .settings { display: flex; flex-wrap: wrap; gap: 18px 28px; align-items: center; margin: 1vh 0 2vh; font-size: 18px; }
+  .settings .lbl { color: var(--muted); margin-right: 8px; }
+  .opt.many { font-size: clamp(18px, 1.8vw, 26px); padding: 1.4vh 1.2vw; }
+  .options.many { grid-template-columns: repeat(4, 1fr); }
+  .bar { height: 10px; background: #ffffff55; border-radius: 99px; margin-top: 8px; transition: width .8s ease; }
+  .banner { text-align: center; font-size: clamp(30px, 4vw, 56px); font-weight: 900; margin: 2vh 0; min-height: 1.3em; }
+  .banner b { color: var(--accent); }
+  .gainers { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  .gainers span { background: var(--card); border-radius: 999px; padding: 6px 14px; font-size: 20px; }
+  .gainers b { color: var(--good); }
+  .statement { text-align: left; }
+  @keyframes pop { from { transform: scale(.6); opacity: 0 } to { transform: none; opacity: 1 } }
+  body.tv .controls, body.tv #newroom, body.tv .x, body.tv .tvhint { display: none !important; }
+  body.tv .game, body.tv .seg button { pointer-events: none; }
+  .host .stage { max-width: 100vw; }
+  @media (max-width: 800px) { .menu { grid-template-columns: 1fr; } .host .code { font-size: 44px; } .host .logo { font-size: 32px; } body.host { font-size: 18px; } .host .controls button { font-size: 18px; padding: 14px 18px; } .options.many { grid-template-columns: 1fr 1fr; } }
+  .pop { animation: pop .5s cubic-bezier(.2, 1.6, .4, 1) both; }
+</style>
+</head>
+<body class="host">
+<div class="stage" id="app"></div>
+<script src="/common.js"></script>
+<script>
+// /host — пульт ведущего (можно с телефона); /1234 — экран комнаты 1234 только для показа (ТВ).
+const tvCode = location.pathname.match(/^\/(\d{4})$/)?.[1];
+const TV = !!tvCode;
+if (TV) document.body.classList.add('tv');
+let host = TV ? { code: tvCode } : store.get('host');  // { code, hostToken }
+let S = null, screenKey = '', revealTimer = null;
+const app = $('#app');
+const act = (action, extra = {}) => post('/api/host', { code: host.code, hostToken: host.hostToken, action, ...extra }).catch(e => alert(e.message));
+const joinUrl = () => location.origin + '/?room=' + host.code;
+
+async function newRoom() {
+  const r = await post('/api/create', {});
+  host = r; store.set('host', r); screenKey = '';
+}
+
+const GAMES = {
+  who: { title: 'Кто это?', text: 'Каждый пишет о себе малоизвестный факт. На экране — факт, все угадывают, чей он.' },
+  lie: { title: 'Две правды и ложь', text: 'Каждый пишет три утверждения о себе, одно ложное. Остальные ищут ложь.' },
+};
+
+function lobby() {
+  const s = S;
+  app.innerHTML = `
+    <div class="top"><div class="logo">Кто <span>это?</span></div>
+      <button class="ghost" id="newroom" style="width:auto;margin:0">Новая комната</button></div>
+    <div class="lobby">
+      <div>
+        <div class="qr" id="qr"></div>
+        <div class="joinurl">${esc(joinUrl().replace(/^https?:\/\//, ''))}</div>
+        <div class="muted" style="margin-top:6px">Код комнаты</div>
+        <div class="code">${esc(s.code)}</div>
+        <div class="muted tvhint" style="margin-top:10px;font-size:16px">Экран для ТВ (без кнопок):<br><b style="color:var(--text);font-size:20px">${esc(location.host)}/${esc(s.code)}</b></div>
+      </div>
+      <div>
+        <div class="menu">${Object.entries(GAMES).map(([k, g]) =>
+          `<div class="game ${s.game === k ? 'on' : ''}" data-game="${k}"><h3>${g.title}</h3><p>${g.text}</p></div>`).join('')}</div>
+        <div class="settings">
+          ${s.game === 'who' ? `
+            <div><span class="lbl">Рубрика</span><span class="seg">${Object.entries(s.rubrics).map(([k, r]) =>
+              `<button data-rubric="${k}" class="${s.rubric === k ? 'on' : ''}">${esc(r.title)}</button>`).join('')}</span></div>
+            <div><span class="lbl">Ответы</span><span class="seg">
+              <button data-mode="four" class="${s.whoMode === 'four' ? 'on' : ''}">4 варианта</button>
+              <button data-mode="all" class="${s.whoMode === 'all' ? 'on' : ''}">Все игроки (сложно)</button></span></div>` : ''}
+          <div><span class="lbl">Вопросов в раунде</span><span class="seg">${[10, 20, 30, 0].map(n =>
+            `<button data-limit="${n}" class="${s.limit === n ? 'on' : ''}">${n || 'все'}</button>`).join('')}</span></div>
+        </div>
+        <h3 id="count"></h3>
+        <div class="players" id="players"></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="start">Начать игру ▶</button>
+      <span class="muted" id="hint" style="align-self:center"></span>
+    </div>`;
+  new QRCode($('#qr'), { text: joinUrl(), width: 340, height: 340, correctLevel: QRCode.CorrectLevel.M });
+  app.querySelectorAll('[data-game]').forEach(el => el.onclick = () => act('settings', { game: el.dataset.game }).then(refresh));
+  app.querySelectorAll('[data-rubric]').forEach(el => el.onclick = () => act('settings', { rubric: el.dataset.rubric }).then(refresh));
+  app.querySelectorAll('[data-mode]').forEach(el => el.onclick = () => act('settings', { whoMode: el.dataset.mode }).then(refresh));
+  app.querySelectorAll('[data-limit]').forEach(el => el.onclick = () => act('settings', { limit: Number(el.dataset.limit) }).then(refresh));
+  $('#start').onclick = () => act('start').then(refresh);
+  $('#newroom').onclick = async () => { if (confirm('Создать новую комнату? Игрокам придётся войти заново.')) { await newRoom(); refresh(); } };
+  lobbyLive();
+}
+
+function lobbyLive() {
+  const s = S;
+  const ready = s.players.filter(p => p.ready).length;
+  $('#count').textContent = `Игроки: ${s.players.length} · готовы ${ready}`;
+  $('#players').innerHTML = s.players.map(p =>
+    `<span class="pl ${p.ready ? 'ready' : ''}">${p.ready ? '✔' : '✎'} ${esc(p.name)}${s.game === 'who' && p.facts ? ` <small>${p.facts}</small>` : ''}
+      <span class="x" data-kick="${p.id}" title="Убрать">×</span></span>`).join('') || '<span class="muted">Сканируйте QR-код телефоном</span>';
+  $('#players').querySelectorAll('[data-kick]').forEach(el => el.onclick = () => {
+    const p = s.players.find(x => x.id === el.dataset.kick);
+    if (confirm(`Убрать ${p.name}?`)) act('kick', { playerId: p.id }).then(refresh);
+  });
+  const n = s.limit ? Math.min(s.limit, s.unplayed) : s.unplayed;
+  $('#hint').textContent = s.unplayed ? `В раунде будет ${n} вопрос(ов) · ~${Math.ceil(n * 45 / 60)} мин` : 'Ждём, пока игроки напишут о себе';
+}
+
+function question() {
+  const q = S.q;
+  const many = q.options.length > 6;
+  app.innerHTML = `
+    <div class="top"><div class="muted">Вопрос ${q.number} из ${q.count}${q.rubric ? ' · ' + esc(q.rubric) : ''}</div><div class="code" style="font-size:44px" id="sec"></div></div>
+    ${q.kind === 'lie'
+      ? `<div class="banner"><b>${esc(q.authorName)}</b>: что из этого — ложь?</div>`
+      : `<div class="quote">${esc(q.text)}</div><div class="banner" style="font-size:32px;margin-top:-2vh">Кто это написал?</div>`}
+    <div class="timer"><div id="bar"></div></div>
+    <div class="options ${many ? 'many' : ''}" id="opts">${q.options.map(o =>
+      `<div class="opt ${many ? 'many' : ''} ${q.kind === 'lie' ? 'statement' : ''}" data-id="${esc(o.id)}"><span>${esc(o.name)}</span><span class="cnt"></span></div>`).join('')}</div>
+    <div class="controls">
+      <button id="reveal">Показать ответ</button>
+      <button class="ghost" id="finish">Завершить игру</button>
+      <span class="muted" id="ans" style="align-self:center;font-size:24px"></span>
+    </div>`;
+  $('#reveal').onclick = () => act('reveal').then(refresh);
+  $('#finish').onclick = () => confirm('Закончить игру и показать итоги?') && act('finish').then(refresh);
+  questionLive();
+}
+
+function questionLive() {
+  const q = S.q, left = secondsLeft(q.endsAt, S.clientSkew);
+  $('#sec').textContent = left;
+  $('#bar').style.width = (left / 25 * 100) + '%';
+  $('#ans').textContent = `Ответили ${q.answered} из ${q.voters}`;
+}
+
+// Раскрытие с паузой: сначала голоса, через 2 секунды — правильный ответ.
+function reveal() {
+  const q = S.q;
+  const many = q.options.length > 6;
+  const maxVotes = Math.max(1, ...Object.values(q.tally));
+  const answer = q.options.find(o => String(o.id) === String(q.answer));
+  const gainers = Object.entries(q.gained).filter(([pid, p]) => p > 0 && pid !== q.authorId)
+    .sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .map(([pid, p]) => `<span>${esc(S.players.find(x => x.id === pid)?.name || '')} <b>+${p}</b></span>`).join('');
+  const authorName = S.players.find(x => x.id === q.authorId)?.name || '';
+  const guessed = q.tally[q.answer] || 0;
+  app.innerHTML = `
+    <div class="top"><div class="muted">Вопрос ${q.number} из ${q.count}</div></div>
+    ${q.kind === 'lie' ? `<div class="banner"><b>${esc(authorName)}</b>: где ложь?</div>` : `<div class="quote" style="margin:2vh 0">${esc(q.text)}</div>`}
+    <div class="options ${many ? 'many' : ''}">${q.options.map(o => `
+      <div class="opt ${many ? 'many' : ''} ${q.kind === 'lie' ? 'statement' : ''}" data-id="${esc(o.id)}" style="flex-direction:column;align-items:stretch">
+        <div style="display:flex;justify-content:space-between"><span>${esc(o.name)}</span><span class="cnt">${q.tally[o.id] || 0}</span></div>
+        <div class="bar" style="width:0" data-w="${(q.tally[o.id] || 0) / maxVotes * 100}"></div>
+      </div>`).join('')}</div>
+    <div class="banner" id="banner">…</div>
+    <div class="gainers" id="gainers" style="visibility:hidden">${gainers}</div>
+    <div class="controls" style="visibility:hidden" id="ctl">
+      <button id="next">${q.number < q.count ? 'Следующий вопрос ▶' : 'Итоги 🏆'}</button>
+      <span class="muted" style="align-self:center">Угадали ${guessed} из ${q.voters} · ${esc(authorName)} получает +${q.gained[q.authorId] || 0}</span>
+    </div>`;
+  requestAnimationFrame(() => app.querySelectorAll('.bar').forEach(b => b.style.width = b.dataset.w + '%'));
+  clearTimeout(revealTimer);
+  revealTimer = setTimeout(() => {
+    app.querySelectorAll('.opt').forEach(el => el.classList.add(String(el.dataset.id) === String(q.answer) ? 'correct' : 'dim'));
+    $('#banner').innerHTML = q.kind === 'lie'
+      ? `<span class="pop" style="display:inline-block">Ложь: <b>${esc(answer?.name || '')}</b></span>`
+      : `<span class="pop" style="display:inline-block">Это <b>${esc(answer?.name || '')}</b>!</span>`;
+    $('#gainers').style.visibility = 'visible';
+    $('#ctl').style.visibility = 'visible';
+  }, 2000);
+  $('#next').onclick = () => act('next').then(refresh);
+}
+
+function final() {
+  const sorted = [...S.players].sort((a, b) => b.score - a.score);
+  const medal = ['🥇', '🥈', '🥉'];
+  app.innerHTML = `
+    <div class="top"><div class="logo">Итоги <span>раунда</span></div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4vw;margin-top:3vh">
+      <ol class="board">${sorted.slice(0, 10).map((p, i) => `<li class="pop" style="animation-delay:${(9 - i) * .15}s"><span>${medal[i] || ''} ${esc(p.name)}</span><b>${p.score}</b></li>`).join('')}</ol>
+      <div>
+        ${S.mysterious ? `<div class="card pop" style="animation-delay:2s;font-size:30px">🕵️ Самый загадочный<br><b style="font-size:48px;color:var(--accent)">${esc(S.mysterious.name)}</b>
+          <div class="muted" style="font-size:20px">его угадали ${Math.round(S.mysterious.ratio * 100)}% раз</div></div>` : ''}
+      </div>
+    </div>
+    <div class="controls">
+      <button id="again">Новый раунд ▶</button>
+      <button class="ghost" id="fresh">Новый раунд с чистого листа</button>
+      <span class="muted" style="align-self:center">«Новый раунд» — сыгранное не повторится, ненаписанное можно дописать. Режим и рубрику можно сменить в меню.</span>
+    </div>`;
+  $('#again').onclick = () => act('lobby').then(refresh);
+  $('#fresh').onclick = () => confirm('Стереть всё, что написали игроки?') && act('lobby', { clear: true }).then(refresh);
+}
+
+function draw(s) {
+  S = s;
+  const key = [s.phase, s.game, s.rubric, s.whoMode, s.limit, s.code, s.q?.number].join('|');
+  if (key !== screenKey) {
+    screenKey = key;
+    ({ lobby, question, reveal, final })[s.phase]();
+  } else if (s.phase === 'lobby') lobbyLive();
+  else if (s.phase === 'question') questionLive();
+}
+
+function refresh() {
+  fetch('/api/state?' + new URLSearchParams({ code: host.code, hostToken: host.hostToken }), { cache: 'no-store' })
+    .then(r => r.json()).then(s => { s.clientSkew = s.serverNow - Date.now(); if (s.phase) draw(s); }).catch(() => {});
+}
+
+(async () => {
+  if (!host) await newRoom();
+  if (TV) document.title = 'Кто это? — комната ' + tvCode;
+  poll(() => host && { code: host.code, hostToken: host.hostToken }, draw, async e => {
+    if (/не найдена/.test(e.message)) { if (TV) app.innerHTML = '<div class="banner">Комната ' + esc(tvCode) + ' не найдена</div>'; else await newRoom(); }
+  });
+})();
+</script>
+</body>
+</html>

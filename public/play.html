@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14101f">
+<title>Кто это?</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script src="/common.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+let code = params.get('room') || store.get('room') || '';
+let playerId = code ? store.get('pid:' + code) : null;
+let S = null, screenKey = '', pickedRubric = null;
+const app = $('#app');
+
+function setRoom(c, pid) {
+  code = c; playerId = pid;
+  store.set('room', c);
+  if (pid) store.set('pid:' + c, pid);
+}
+
+function leave() {
+  store.del('pid:' + code); store.del('room');
+  code = ''; playerId = null; S = null; screenKey = ''; draw();
+}
+
+// ---------- экраны ----------
+
+function joinScreen(err) {
+  app.innerHTML = `
+    <div class="logo">Кто <span>это?</span></div>
+    <p class="muted">Игра для компании: напиши о себе то, чего никто не знает, — и угадай остальных.</p>
+    <div class="card">
+      <label class="muted">Код комнаты</label>
+      <input id="code" inputmode="numeric" maxlength="4" placeholder="1234" value="${esc(code)}">
+      <div style="height:12px"></div>
+      <label class="muted">Твоё имя</label>
+      <input id="name" maxlength="24" placeholder="Имя и первая буква фамилии" autocomplete="given-name">
+      <button id="go">Войти</button>
+      <div class="error" id="err">${esc(err || '')}</div>
+    </div>`;
+  $('#name').focus();
+  const go = async () => {
+    const c = $('#code').value.trim(), name = $('#name').value.trim();
+    try {
+      const r = await post('/api/join', { code: c, name, playerId: store.get('pid:' + c) });
+      setRoom(c, r.playerId); screenKey = ''; refresh();
+    } catch (e) { $('#err').textContent = e.message; }
+  };
+  $('#go').onclick = go;
+  $('#name').onkeydown = e => e.key === 'Enter' && go();
+}
+
+function header() {
+  return `<div class="row" style="justify-content:space-between">
+    <div class="logo" style="font-size:22px;flex:0">Кто&nbsp;<span>это?</span></div>
+    <div class="muted" style="text-align:right;flex:0;white-space:nowrap">${esc(S.me.name)} · <b id="myscore">${myScore()}</b></div>
+  </div>`;
+}
+const myScore = () => S.players.find(p => p.id === S.me.id)?.score ?? 0;
+
+function lobbyWho() {
+  const R = S.rubrics, rub = R[S.rubric];
+  const facts = S.me.facts;
+  const mix = S.rubric === 'mix';
+  if (!pickedRubric || !R[pickedRubric] || pickedRubric === 'mix') pickedRubric = mix ? 'fear' : S.rubric;
+  const cur = R[mix ? pickedRubric : S.rubric];
+  app.innerHTML = header() + `
+    <div class="card">
+      <div class="muted">Рубрика: <b style="color:var(--text)">${esc(rub.title)}</b></div>
+      ${mix ? `<div class="hint-chips" id="rubs">${Object.entries(R).filter(([k]) => k !== 'mix').map(([k, r]) =>
+        `<span class="chip" data-r="${k}" style="${k === pickedRubric ? 'border-color:var(--accent);color:var(--text)' : ''}">${esc(r.title)}</span>`).join('')}</div>` : ''}
+      <h2 style="margin-top:10px">${esc(cur.prompt)}</h2>
+      <p class="muted" style="margin-top:0">Пиши от первого лица. Лучше то, о чём знают единицы, — за неугаданное очки получаешь ты.</p>
+      ${facts.length < S.maxFacts ? `
+        <textarea id="fact" maxlength="160" placeholder="${esc((cur.examples || ['Я никогда…'])[0])}"></textarea>
+        <div class="hint-chips">${(cur.examples || []).map(x => `<span class="chip" data-ex="${esc(x)}">${esc(x)}</span>`).join('')}</div>
+        <button id="add">Добавить</button>
+        <div class="error" id="err"></div>` : `<p>Ты написал(а) максимум — ${S.maxFacts}. Можно удалить и переписать.</p>`}
+    </div>
+    ${facts.length ? `<div class="card"><div class="muted" style="margin-bottom:6px">Твои факты (их видишь только ты):</div>
+      ${facts.map(f => `<div class="fact"><p>${esc(f.text)}${mix ? ` <small class="muted">· ${esc(f.rubric)}</small>` : ''}</p><button class="ghost" data-rm="${f.id}">×</button></div>`).join('')}</div>` : ''}
+    <p class="muted" id="wait"></p>
+    <button class="ghost" id="leave">Выйти из комнаты</button>`;
+  app.querySelectorAll('[data-r]').forEach(el => el.onclick = () => { pickedRubric = el.dataset.r; screenKey = ''; draw(); });
+  app.querySelectorAll('[data-ex]').forEach(el => el.onclick = () => { const t = $('#fact'); t.value = el.dataset.ex + ' '; t.focus(); });
+  app.querySelectorAll('[data-rm]').forEach(el => el.onclick = () => post('/api/fact', { code, playerId, removeId: el.dataset.rm }).then(refresh));
+  const add = $('#add');
+  if (add) add.onclick = async () => {
+    try { await post('/api/fact', { code, playerId, text: $('#fact').value, rubric: pickedRubric }); screenKey = ''; refresh(); }
+    catch (e) { $('#err').textContent = e.message; }
+  };
+  $('#leave').onclick = leave;
+}
+
+function lobbyLie() {
+  const lie = S.me.lie;
+  app.innerHTML = header() + `
+    <div class="card">
+      <div class="muted">Режим: <b style="color:var(--text)">Две правды и ложь</b></div>
+      <h2 style="margin-top:10px">Напиши о себе три утверждения: два правдивых и одно ложное</h2>
+      <p class="muted" style="margin-top:0">Отметь кружком ложь. Остальные будут её искать. Чем правдоподобнее ложь — тем больше очков тебе.</p>
+      ${[0, 1, 2].map(i => `
+        <div class="row" style="margin:10px 0;align-items:flex-start">
+          <label style="flex:0;padding-top:14px"><input type="radio" name="lie" value="${i}" style="width:22px;height:22px" ${lie && lie.lieIndex === i ? 'checked' : ''}></label>
+          <textarea id="st${i}" maxlength="140" style="min-height:60px" placeholder="${['Я был(а) в 10 странах', 'Я умею играть на гитаре', 'Я ни разу не летал(а) на самолёте'][i]}">${esc(lie ? lie.statements[i] : '')}</textarea>
+        </div>`).join('')}
+      <button id="save">${lie ? 'Сохранить изменения' : 'Готово'}</button>
+      <div class="error" id="err"></div>
+      ${lie ? `<p class="muted">✔ Сохранено. Ложь — №${lie.lieIndex + 1}.</p>` : ''}
+    </div>
+    <p class="muted" id="wait"></p>
+    <button class="ghost" id="leave">Выйти из комнаты</button>`;
+  $('#save').onclick = async () => {
+    const checked = app.querySelector('input[name=lie]:checked');
+    try {
+      await post('/api/lie', { code, playerId, statements: [0, 1, 2].map(i => $('#st' + i).value), lieIndex: checked ? Number(checked.value) : -1 });
+      screenKey = ''; refresh();
+    } catch (e) { $('#err').textContent = e.message; }
+  };
+  $('#leave').onclick = leave;
+}
+
+function questionScreen() {
+  const q = S.q;
+  const title = q.kind === 'lie'
+    ? `<div class="muted">Вопрос ${q.number} из ${q.count} · найди ложь</div><h2 style="margin-top:8px">${esc(q.authorName)}: что из этого неправда?</h2>`
+    : `<div class="muted">Вопрос ${q.number} из ${q.count}${q.rubric ? ' · ' + esc(q.rubric) : ''}</div><div class="quote" style="margin-top:10px">${esc(q.text)}</div><p class="muted">Кто это написал?</p>`;
+  if (q.isMine) {
+    app.innerHTML = header() + `<div class="card">${title}</div>
+      <div class="big-center"><div class="emoji">🤫</div><h2>Это про тебя!</h2><p class="muted">Не выдавай себя. Чем меньше людей угадает — тем больше очков получишь ты.</p></div>
+      <div class="timer"><div id="bar"></div></div><p class="muted" id="cnt"></p>`;
+    return;
+  }
+  app.innerHTML = header() + `<div class="card">${title}
+      <div class="timer"><div id="bar"></div></div>
+      <div class="options">${q.options.map(o => {
+        const self = q.kind === 'who' && o.id === S.me.id;
+        return `<button class="opt ${q.myVote !== null ? (q.myVote === o.id ? 'chosen' : 'dim') : ''}" data-id="${esc(o.id)}" ${q.myVote !== null || self ? 'disabled' : ''}>
+          <span>${esc(o.name)}${self ? ' <small>(это ты)</small>' : ''}</span></button>`;
+      }).join('')}</div>
+      <div class="error" id="err"></div>
+    </div>
+    <p class="muted" id="cnt"></p>`;
+  app.querySelectorAll('.opt').forEach(b => b.onclick = async () => {
+    const choice = q.kind === 'lie' ? Number(b.dataset.id) : b.dataset.id;
+    app.querySelectorAll('.opt').forEach(x => { x.disabled = true; x.classList.add(x === b ? 'chosen' : 'dim'); });
+    try { await post('/api/vote', { code, playerId, choice }); }
+    catch (e) { $('#err').textContent = e.message; }
+  });
+}
+
+function revealScreen() {
+  const q = S.q;
+  const pts = q.gained[S.me.id] || 0;
+  const mine = q.authorId === S.me.id;
+  const right = !mine && q.myVote === q.answer;
+  const answerName = q.options.find(o => o.id === q.answer)?.name;
+  const place = [...S.players].sort((a, b) => b.score - a.score).findIndex(p => p.id === S.me.id) + 1;
+  let head;
+  if (mine) head = `<div class="emoji">😎</div><h2>Не угадали: ${q.voters - (q.tally[q.answer] || 0)} из ${q.voters}</h2>`;
+  else if (right) head = `<div class="emoji">🎉</div><h2>Верно!</h2>`;
+  else head = `<div class="emoji">${q.myVote === null ? '⏰' : '🙈'}</div><h2>${q.myVote === null ? 'Не успел(а)' : 'Мимо'}</h2>`;
+  app.innerHTML = header() + `<div class="big-center">${head}
+      <p>${q.kind === 'lie' ? 'Ложь: ' : 'Это '}<b>${esc(answerName || '')}</b></p>
+      <div class="points">+${pts}</div>
+      <p class="muted">Ты на ${place}-м месте из ${S.players.length}</p>
+    </div>`;
+}
+
+function finalScreen() {
+  const sorted = [...S.players].sort((a, b) => b.score - a.score);
+  const place = sorted.findIndex(p => p.id === S.me.id) + 1;
+  app.innerHTML = header() + `<div class="big-center">
+      <div class="emoji">${place === 1 ? '🏆' : place <= 3 ? '🥈' : '🍻'}</div>
+      <h2>${place}-е место</h2><div class="points">${myScore()}</div></div>
+    <div class="card"><ol class="board">${sorted.slice(0, 5).map(p => `<li><span>${esc(p.name)}</span><b>${p.score}</b></li>`).join('')}</ol></div>
+    ${S.mysterious ? `<div class="card">🕵️ Самый загадочный: <b>${esc(S.mysterious.name)}</b></div>` : ''}
+    <p class="muted" style="text-align:center">Ведущий может начать новый раунд.</p>`;
+}
+
+// ---------- обновление ----------
+
+function draw(s) {
+  if (s) S = s;
+  if (!code || !playerId || !S || !S.me) return joinScreen();
+  const q = S.q;
+  const key = [S.phase, S.game, S.rubric, S.me.facts.length, S.me.lie ? 1 : 0, q?.number, q?.myVote, S.phase === 'final' ? S.players.length : ''].join('|');
+  if (key !== screenKey) {
+    // не перерисовываем форму, пока человек печатает
+    const typing = document.activeElement && ['TEXTAREA', 'INPUT'].includes(document.activeElement.tagName) && S.phase === 'lobby' && screenKey.startsWith('lobby|' + S.game + '|' + S.rubric + '|');
+    if (!typing) {
+      screenKey = key;
+      if (S.phase === 'lobby') S.game === 'lie' ? lobbyLie() : lobbyWho();
+      else if (S.phase === 'question') questionScreen();
+      else if (S.phase === 'reveal') revealScreen();
+      else finalScreen();
+    }
+  }
+  // живые части
+  const w = $('#wait');
+  if (w) { const r = S.players.filter(p => p.ready).length; w.textContent = `Готовы ${r} из ${S.players.length}. Ждём, когда ведущий начнёт игру.`; }
+  if (q && S.phase === 'question') {
+    const left = secondsLeft(q.endsAt, S.clientSkew);
+    const bar = $('#bar'); if (bar) bar.style.width = (left / 25 * 100) + '%';
+    const c = $('#cnt'); if (c) c.textContent = `Осталось ${left} с · ответили ${q.answered} из ${q.voters}`;
+  }
+  const ms = $('#myscore'); if (ms) ms.textContent = myScore();
+}
+
+let poller;
+function refresh() {
+  if (!code || !playerId) return draw();
+  fetch('/api/state?' + new URLSearchParams({ code, playerId }), { cache: 'no-store' })
+    .then(r => r.json().then(s => ({ ok: r.ok, s })))
+    .then(({ ok, s }) => { if (!ok) throw new Error(s.error); s.clientSkew = s.serverNow - Date.now(); draw(s); })
+    .catch(() => {});
+}
+
+poller = poll(() => code && playerId ? { code, playerId } : null, s => {
+  if (!s.me) { store.del('pid:' + code); playerId = null; screenKey = ''; return joinScreen('Тебя нет в этой комнате — войди заново'); }
+  draw(s);
+}, e => { if (/не найдена/.test(e.message)) { store.del('room'); code = ''; playerId = null; joinScreen('Комната не найдена'); } });
+draw();
+</script>
+</body>
+</html>

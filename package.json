@@ -1,0 +1,9 @@
+{
+  "name": "sauna-game",
+  "version": "1.0.0",
+  "description": "«Кто это?» — игра для компании: угадай, кто это написал",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" }
+}
